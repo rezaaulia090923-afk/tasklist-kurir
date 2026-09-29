@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<meta name="theme-color" content="#111827">
+<title>Tasklist Kurir</title>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:#f3f4f6;color:#111827}
+header{background:#111827;color:white;padding:18px 16px;position:sticky;top:0;z-index:5}
+h1{font-size:22px;margin:0 0 5px}.sub{font-size:13px;opacity:.8}
+main{max-width:760px;margin:auto;padding:16px}
+.panel{background:white;border-radius:16px;padding:16px;margin-bottom:14px;box-shadow:0 2px 10px #00000012}
+button,.filebtn{border:0;border-radius:12px;padding:13px 16px;font-weight:700;font-size:15px;cursor:pointer}
+.primary{background:#111827;color:white}.secondary{background:#e5e7eb;color:#111827}
+.filebtn{display:block;text-align:center;background:#2563eb;color:white;margin-bottom:10px}
+input[type=file]{display:none}
+#status{font-size:14px;margin-top:10px;color:#374151;white-space:pre-wrap}
+.progress{height:8px;background:#e5e7eb;border-radius:99px;overflow:hidden;margin-top:10px;display:none}
+.bar{height:100%;width:0;background:#2563eb}
+.card{background:white;border:1px solid #e5e7eb;border-radius:16px;padding:14px;margin:10px 0;box-shadow:0 2px 8px #0000000d;display:flex;gap:10px;align-items:flex-start}
+.handle{font-size:22px;color:#9ca3af;padding-top:4px;touch-action:none;cursor:grab}
+.num{min-width:28px;height:28px;border-radius:50%;background:#111827;color:white;display:flex;align-items:center;justify-content:center;font-weight:bold;font-size:13px;margin-top:3px}
+.content{flex:1}.name{font-size:17px;font-weight:800;margin-bottom:7px}.resi{font-size:13px;color:#4b5563;margin-bottom:7px}.addr{font-size:14px;line-height:1.45;white-space:pre-wrap}.cod{margin-top:9px;display:inline-block;background:#fee2e2;color:#991b1b;padding:6px 9px;border-radius:8px;font-weight:800;font-size:13px}
+.actions{display:flex;gap:8px;margin-top:12px}.actions button{padding:9px 11px;font-size:13px}
+.empty{text-align:center;color:#6b7280;padding:25px 10px}
+.small{font-size:12px;color:#6b7280;line-height:1.4}
+textarea{width:100%;min-height:130px;border:1px solid #d1d5db;border-radius:10px;padding:10px;font:13px monospace}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<header><h1>📦 Tasklist Kurir</h1><div class="sub">Scan screenshot → edit bila perlu → geser urutan sesuka kamu</div></header>
+<main>
+<div class="panel">
+<label class="filebtn">📷 Pilih Screenshot / Foto Paket
+<input id="files" type="file" accept="image/*" multiple>
+</label>
+<button class="secondary" id="addDemo">Coba contoh</button>
+<div id="status"></div>
+<div class="progress" id="progress"><div class="bar" id="bar"></div></div>
+</div>
+
+<div class="panel">
+<div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+<b>Daftar Paket (<span id="count">0</span>)</b>
+<button class="secondary" id="clear" style="padding:8px 10px">Hapus semua</button>
+</div>
+<div class="small" style="margin-top:7px">Tekan dan tahan ☰ lalu geser kartu untuk mengubah urutan.</div>
+<div id="list"><div class="empty">Belum ada paket.</div></div>
+</div>
+
+<div class="panel">
+<b>Hasil OCR mentah</b>
+<div class="small" style="margin:6px 0 8px">Dipakai untuk mengecek kalau ada tulisan yang terbaca kurang tepat.</div>
+<textarea id="raw" readonly placeholder="Hasil OCR akan muncul di sini..."></textarea>
+</div>
+</main>
+
+<script>
+const $=id=>document.getElementById(id);
+let packages=[];
+let dragIndex=null;
+
+function clean(s){return (s||'').replace(/\s+/g,' ').trim()}
+function parseOCR(text){
+  text=text.replace(/\r/g,'');
+  $('raw').value=text;
+  const lines=text.split('\n').map(x=>x.trim()).filter(Boolean);
+  const starts=[];
+  lines.forEach((l,i)=>{if(/SPXID[A-Z0-9]+/i.test(l)) starts.push(i)});
+  if(!starts.length) return [];
+  const out=[];
+  starts.forEach((si,n)=>{
+    const block=lines.slice(si, starts[n+1]??lines.length);
+    const resi=(block.join(' ').match(/SPXID[A-Z0-9]+/i)||[''])[0].toUpperCase();
+    let cod='';
+    const cm=block.join(' ').match(/COD\s*[:\-]?\s*Rp?\s*([\d.,]+)/i);
+    if(cm) cod='Rp'+cm[1];
+    // The SPX card layout normally has: SPXID -> address -> recipient name -> COD.
+    // Find likely recipient as a short line near the end, excluding labels.
+    const candidates=block.slice(1).filter(l=>{
+      const x=l.toLowerCase();
+      return !/^(home|cod|cek dulu)/.test(x) && !/spxid/i.test(x) && !/^(jalan|jl\.?|perumahan|kp\.?|desa|kec\.?|kab\.?|rt|rw|no\.?)/i.test(l);
+    });
+    let name='';
+    for(let i=candidates.length-1;i>=0;i--){
+      const x=candidates[i];
+      if(x.length>=3 && x.length<=45 && !/[,:]/.test(x) && !/\d/.test(x)){name=x;break}
+    }
+    if(!name && block.length>1) name=clean(block[block.length-1]);
+    let addrLines=[];
+    let passedName=false;
+    for(const l of block.slice(1)){
+      if(name && clean(l)===clean(name)){passedName=true;continue}
+      if(!passedName && !/^cod\b/i.test(l) && !/^home$/i.test(l) && !/^cek dulu$/i.test(l)) addrLines.push(l);
+    }
+    let address=addrLines.join(' ');
+    address=address.replace(/\s{2,}/g,' ').trim();
+    out.push({name:name||'Nama tidak terbaca',resi,address:address||'Alamat tidak terbaca',cod});
+  });
+  return out;
+}
+function addPackages(items){
+  for(const p of items){
+    if(!p.resi && !p.name) continue;
+    const existing=packages.find(x=>x.resi && p.resi && x.resi===p.resi);
+    if(!existing) packages.push(p);
+  }
+  render();
+}
+function render(){
+  $('count').textContent=packages.length;
+  if(!packages.length){$('list').innerHTML='<div class="empty">Belum ada paket.</div>';return}
+  $('list').innerHTML='';
+  packages.forEach((p,i)=>{
+    const card=document.createElement('div');card.className='card';card.draggable=true;card.dataset.i=i;
+    card.innerHTML=`
+      <div class="handle">☰</div><div class="num">${i+1}</div>
+      <div class="content">
+        <div class="name">${esc(p.name)}</div>
+        <div class="resi">${esc(p.resi)}</div>
+        <div class="addr">${esc(p.address)}</div>
+        ${p.cod?`<div class="cod">COD: ${esc(p.cod)}</div>`:''}
+        <div class="actions"><button class="secondary edit">Edit</button><button class="secondary del">Hapus</button></div>
+      </div>`;
+    card.addEventListener('dragstart',()=>dragIndex=i);
+    card.addEventListener('dragover',e=>e.preventDefault());
+    card.addEventListener('drop',e=>{e.preventDefault(); if(dragIndex===null||dragIndex===i)return; const [x]=packages.splice(dragIndex,1);packages.splice(i,0,x);dragIndex=null;render()});
+    card.querySelector('.del').onclick=()=>{packages.splice(i,1);render()};
+    card.querySelector('.edit').onclick=()=>edit(i);
+    $('list').appendChild(card);
+  });
+}
+function edit(i){
+  const p=packages[i];
+  const name=prompt('Nama penerima:',p.name); if(name===null)return;
+  const resi=prompt('SPXID / resi:',p.resi); if(resi===null)return;
+  const address=prompt('Alamat lengkap:',p.address); if(address===null)return;
+  const cod=prompt('COD (kosongkan jika tidak ada):',p.cod||''); if(cod===null)return;
+  packages[i]={name:name.trim(),resi:resi.trim(),address:address.trim(),cod:cod.trim()};render();
+}
+function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+
+async function ocrFile(file){
+  $('progress').style.display='block';$('bar').style.width='5%';
+  $('status').textContent='Membaca gambar...';
+  const worker=await Tesseract.createWorker('ind',1,{logger:m=>{
+    if(m.status){$('status').textContent='OCR: '+m.status+(m.progress?` ${Math.round(m.progress*100)}%`:'')}
+    if(m.progress)$('bar').style.width=(5+m.progress*90)+'%';
+  }});
+  const {data:{text}}=await worker.recognize(file);
+  await worker.terminate();
+  $('bar').style.width='100%';
+  $('status').textContent='Selesai. Cek dan edit hasil bila ada yang kurang tepat.';
+  return text;
+}
+$('files').onchange=async e=>{
+  const files=[...e.target.files]; if(!files.length)return;
+  let all='';
+  for(const f of files){
+    try{all += '\n'+await ocrFile(f)}catch(err){$('status').textContent='Gagal membaca '+f.name+': '+err.message}
+  }
+  const items=parseOCR(all);
+  addPackages(items);
+};
+$('clear').onclick=()=>{if(confirm('Hapus semua paket?')){packages=[];render();$('raw').value='';$('status').textContent=''}};
+$('addDemo').onclick=()=>{
+  addPackages([
+    {name:'Cecep Iwan Setiawan',resi:'SPXID065101603369',address:'Jalan Raya Kalisuren, Gang RINA, RT 002 RW 01 No.92, Kp. Berkat, Desa Kalisuren, Kec. Tajurhalang, Kab. Bogor',cod:'Rp10.900'},
+    {name:'Jesty Cordelia',resi:'SPXID062335062839',address:'Perumahan Griya Kalisuren Blok C1 No.1 RT 03/04 Kalisuren',cod:''}
+  ]);
+  $('status').textContent='Contoh dimasukkan.';
+};
+render();
+</script>
+</body>
+</html>
